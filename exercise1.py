@@ -4,10 +4,10 @@ We read a txt file, outputs:
 - Dict of scenarios
 - capacity
 '''
-def read_data():
+def read_data(file='20items_50capacity_50scens.txt'):
     revenue_dict = {}
     scenarios_dict = {}
-    with open('20items_50capacity_50scens.txt') as f:
+    with open(file) as f:
         cnt = 0
         for line in f:
             if cnt == 0:
@@ -54,9 +54,9 @@ def stochastic_knapsack_stochastic_model(n_items, revenue_dict, penalize_by, sce
     model.setObjective(quicksum(x[i]*revenue_dict[i] for i in range(n_items)) - penalize_by*quicksum(scenarios_dict[s]["p"]*z[s] for s in range(n_scenarios)), sense="maximize")
     return model
 
-def run_stochastic_knapsack_main_model():
+def run_stochastic_knapsack_main_model(penalize_by):
     revenue_dict, scenarios_dict, capacity = read_data()
-    model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, 1, scenarios_dict, len(scenarios_dict.keys()), capacity)
+    model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
 
     model.optimize()
 
@@ -69,7 +69,7 @@ def run_stochastic_knapsack_main_model():
     for model_var in model_vars:
         print(f"Variable {model_var.name} has value {model.getVal(model_var)}")
 
-def stochastic_knapsack_deterministic_model(weights, n_items, n_scenarios, cap, revenue_dict):
+def stochastic_knapsack_deterministic_model(weights, n_items, cap, revenue_dict):
     from pyscipopt import Model, quicksum
 
     model = Model()
@@ -100,7 +100,7 @@ def run_stochastic_knapsack_deterministic_model(penalize_by):
     weights_raw = [[weights_dict[i]["prob"][j] * weights_dict[i]["weight"][j] for j in range(n_scenarios) ] for i in weights_dict]
     weights = [sum(weights_raw[i]) for i in range(n_items)]
 
-    model=stochastic_knapsack_stochastic_model(weights, n_items,n_scenarios, capacity, revenue_dict)
+    model=stochastic_knapsack_deterministic_model(weights, n_items, capacity, revenue_dict)
 
     x = {}
     model.optimize()
@@ -117,4 +117,80 @@ def run_stochastic_knapsack_deterministic_model(penalize_by):
             scenario_weight += x[i] * scenario_weights[i]
         if scenario_weight > capacity:
             total_weighted_excess += scenario_weight*prob
-    return total_weighted_excess * penalize_by
+    print("The total penalization is" ,total_weighted_excess * penalize_by)
+
+def run_stochastic_knapsack_perfect_information():
+    revenue_dict, scenarios_dict, capacity = read_data()
+
+    n_items = len(revenue_dict.keys())
+    n_scenarios = len(scenarios_dict.keys())
+
+    weighted_objectives = 0
+
+    for scenario in range(n_scenarios):
+        model=stochastic_knapsack_deterministic_model(scenarios_dict[scenario]["w"], n_items, capacity, revenue_dict)
+    #TODO
+        model.optimize()
+        weighted_objectives += model.getObjVal()*scenarios_dict[scenario]["p"]
+    return weighted_objectives
+
+def run_stochastic_knapsack_in_stability(penalize_by, stop_condition):
+    import os
+    from statistics import mean, stdev
+
+    n_scenarios = 1
+    m_size = 5
+    condition = stop_condition*100
+    while condition > stop_condition:
+        n_scenarios += 1
+        objectives = []
+        for m in range(m_size):
+            os.system('python make_knapsack_data.py 20 100 {} >> folder/{}_{}.txt'.format(n_scenarios,m,n_scenarios))
+            revenue_dict, scenarios_dict, capacity = read_data("folder/{}_{}.txt".format(m,n_scenarios))
+            model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
+            model.optimize()
+            obj_val = model.getObjVal()
+            objectives.append(obj_val)
+        differences = []
+        for i in range(len(objectives)):
+            for j in range(len(objectives)):
+                if i != j:
+                   differences.append(abs(objectives[i] - objectives[j]))
+        # condition = mean(differences)
+        condition = stdev(differences)
+    return n_scenarios
+
+def run_stochastic_knapsack_out_stability(penalize_by, stop_condition, step=20, m_size=20):
+    import os
+    from statistics import mean, stdev
+
+
+    os.system('python make_knapsack_data.py 20 100 1000 >> folder/big_instance.txt')
+    revenue_dict, scenarios_dict, capacity = read_data("folder/big_instance.txt")
+    model_big=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
+    model_big.optimize()
+    obj_val_big = model_big.getObjVal()
+    
+    n_scenarios = 0
+    m_size = m_size
+    condition = stop_condition*100
+    while condition > stop_condition:
+        n_scenarios += step
+        objectives = []
+        for m in range(m_size):
+            os.system('python make_knapsack_data.py 20 100 {} >> folder/{}_{}.txt'.format(n_scenarios,m,n_scenarios))
+            revenue_dict, scenarios_dict, capacity = read_data("folder/{}_{}.txt".format(m,n_scenarios))
+            model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
+            model.optimize()
+            obj_val = model.getObjVal()
+            objectives.append(obj_val)
+        differences = []
+        for i in range(len(objectives)):
+            differences.append(abs(obj_val_big - objectives[i]))
+        # condition = mean(differences)
+        condition = stdev(differences)/mean(differences)
+    return n_scenarios
+
+stop_condition = 0.5
+in_scenarios_stable = run_stochastic_knapsack_out_stability(1, stop_condition)
+print("required number of scenarios to reach out-stability of tolerance CV = {} is {}.".format(stop_condition, in_scenarios_stable))
