@@ -1,0 +1,7 @@
+Leg origin,Leg destination,travel time in days
+A,D,3
+A,E,4
+B,D,4
+B,E,4
+C,D,3
+C,E,3
