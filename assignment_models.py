@@ -24,6 +24,18 @@ def read_consolidation_to_customer_data(file="data_files/cust_consol_moves.txt")
             cnt += 1
     return access_dict
 
+def read_consolidation_points_data(file="data_files/consol_points.txt"):
+    consolidation = []
+    with open(file) as f:
+        cnt = 0
+        for line in f:
+            if cnt == 0:
+                continue
+            else:
+                consolidation.append(line)
+            cnt += 1
+    return consolidation
+
 def read_customers_data(file="data_files/customers.txt"):
     customer_dict = {}
     with open(file) as f:
@@ -59,7 +71,10 @@ def read_cargo_legs_data(file="data_files/passenger_cargo_legs.txt"):
                 continue
             else:
                 line_data = line.split(",")
-                cargo_legs_dict[line_data[0], line_data[1]] = {"day": int(line_data[2]), "block_cost": int(line_data[3]), "block_capacity": int(line_data[4]), "cargo_block_capacity": int(line_data[5])}
+                if (line_data[0], line_data[1]) not in cargo_legs_dict:
+                    cargo_legs_dict[line_data[0], line_data[1]] = [{"day": int(line_data[2]), "block_cost": int(line_data[3]), "block_capacity": int(line_data[4]), "cargo_block_capacity": int(line_data[5])}]
+                else:
+                    cargo_legs_dict[line_data[0], line_data[1]].append({"day": int(line_data[2]), "block_cost": int(line_data[3]), "block_capacity": int(line_data[4]), "cargo_block_capacity": int(line_data[5])})
             cnt += 1
     return cargo_legs_dict
 
@@ -84,20 +99,120 @@ def read_scenario_data(pattern="100"):
                 cnt += 1
     return scenario_dict
 
-'''
-We read a txt file, outputs:
-- Dict of revenues
-- Dict of scenarios
-- capacity
-'''
-def read_data():
+def cargo_at_day(cons_i, dest_i, depart_opportunity_day, cargo_data):
+    options_list = cargo_data[cons_i, dest_i]
+    for option in options_list:
+        if option["day"] == depart_opportunity_day:
+            return option
+    return None
 
+def build_paths_for_customer_consolidation_pair(cons_i, dest_i, cust_to_origin_consolidation, dest_consolidation_to_dest, customer, leg, cargo_data):
+
+    cust_i_1_tt = cust_to_origin_consolidation["travel_times"]
+    cust_i_3_tt = dest_consolidation_to_dest["travel_times"]
+
+    cust_i_1_c = cust_to_origin_consolidation["cost"]
+    cust_i_3_c = dest_consolidation_to_dest["cost"]
+
+    cust_i_pd = customer["pick-up_day"]
+    cust_i_dd = cust_i_pd + customer["service"]
+
+    leg_tt = leg["travel_times"]
+
+    tt = cust_i_1_tt + cust_i_3_tt + leg_tt
+
+    if cust_i_pd + tt > cust_i_dd:
+        return None
+    else:
+        slack_times = cust_i_dd - (cust_i_pd + tt) + 1
+        alternatives = []
+        for depart_opportunity_day in range(cust_i_pd + cust_i_1_tt, cust_i_pd + cust_i_1_tt + slack_times):
+            scheduled_object = cargo_at_day(cons_i, dest_i, depart_opportunity_day, cargo_data)
+            if scheduled_object == None:
+                return None
+            else:
+                arrival_time = depart_opportunity_day + leg_tt + cust_i_3_tt
+                alternatives.append({"origin": cons_i, "destination": dest_i, "departing_at": depart_opportunity_day - cust_i_1_tt, "arriving_at": arrival_time, "land_cost": cust_i_1_c + cust_i_3_c, "air_block_cost": scheduled_object["block_cost"], "block_cap": scheduled_object["block_capacity"], "air_cap_blocks": scheduled_object["cargo_block_capacity"]})
+    return alternatives
+
+
+def read_data():
+    '''
+    We read a txt file, outputs:
+    n_scenarios ready!
+    n_cust ready!
+    n_days ready!
+    n_legs ready!
+
+    these are available in dict scenario_dict
+    scenario_chance          # List[float] of length n_scenarios
+    revenue                  # List[float] of length n_cust
+    demand                   # List[List[float]] or 2D array: [n_cust][n_scenarios]
+
+
+    capacity_cost            # List[List[float]] or 2D array: [n_legs][n_days]
+    unit_size                # List[List[float]] or 2D array: [n_legs][n_days]
+
+    path_cost                # List[List[float]] or 2D array: [n_cust][n_paths] ready!
+
+    paths_of_customer        # Dict[int, List[int]] ready!
+    days_per_customer_path   # Dict[int, Dict[int, List[int]]] ready!
+    day_for_leg_in_path      # Dict[int, Dict[int, List[int]]] 
+    '''
     exit_dict = read_customer_to_consolidation_data()
     access_dict = read_consolidation_to_customer_data()
     customer_dict = read_customers_data()
     legs_dict = read_legs_data()
     cargo_legs_dict = read_cargo_legs_data()
     scenario_dict = read_scenario_data()
+    consolidation = read_consolidation_points_data()
+
+    n_cust = len(customer_dict)
+
+    n_days = max(v["day"] for v in cargo_legs_dict.values()) + 5  # assuming days start at 0
+
+    n_legs = len(legs_dict)
+
+    scenarios_all = {}
+    for realisation in scenario_dict:
+        (n_cust_scen, n_scenarios) = realisation
+        scenario_info = scenario_dict[realisation]
+
+        scenario_chance = [scenario_info[s]["p"] for s in range(n_scenarios)]
+        demand = [[scenario_info[s]["d"][c] for s in range(n_scenarios)] for c in range(n_cust)]
+
+        revenue = [customer_dict[c]["unit_revenue"] for c in range(n_cust)]
+        scenarios_all[realisation] = {
+            "scenario_chance": scenario_chance,
+            "demand": demand,
+            "revenue": revenue
+        }
+
+    # paths
+    path_cost = {}
+    days_per_customer_path = {}
+    paths_of_customer = {}
+    route_id = 0
+    for c in range(n_cust):
+        path_cost[c] = []
+        days_per_customer_path[c] = []
+        paths_of_customer = []
+        customer = customer_dict[c]
+        for cons_i in consolidation:
+            if (c, cons_i) in exit_dict:
+                cust_to_origin_consolidation = exit_dict[c, cons_i]
+                for dest_i in consolidation:
+                    if (dest_i, c) in access_dict:
+                        dest_consolidation_to_dest = access_dict[c, dest_i]
+                        leg = legs_dict[cons_i, dest_i]
+                        alternatives = build_paths_for_customer_consolidation_pair(cons_i, dest_i, cust_to_origin_consolidation, dest_consolidation_to_dest, customer, leg, cargo_legs_dict)
+                        if alternatives != None:
+                            path_cost[c] += [alternatives[i]["air_block_cost"] + alternatives[i]["land_cost"] for i in range(len(alternatives))]
+                            days_per_customer_path[c] += [alternatives[i]["departing_at"] for i in range(len(alternatives))]
+                            for _ in alternatives:
+                                paths_of_customer.append(route_id)
+                                route_id += 1
+
 
     return
 
@@ -111,7 +226,7 @@ def stoch_FFP_stochastic_model():
 
     for s in range(n_scenarios):
         for c in range(n_cust):
-            for p in range(n_paths):
+            for p in paths_of_customer[c]:
                 for d in range(n_days):
                     x[c,p,d,s] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}_{}'.format(c,p,d,s))
     
@@ -126,7 +241,7 @@ def stoch_FFP_stochastic_model():
     model.setObjective((
         quicksum(scenario_chance[s] * revenue[c] * z[c,s] for c in range(n_cust) for s in range(n_scenarios))
         - quicksum(capacity_cost[l][d] * y[l,d] for l in range(n_legs) for d in range(n_days))
-        - quicksum(scenario_chance[s] * path_cost[p][c] * x[c,p,d,s] for d in days_per_customer_path[c][p] for p in paths_of_customer[c] for c in range(n_cust) for s in range(n_scenarios))
+        - quicksum(scenario_chance[s] * path_cost[c][p] * x[c,p,d,s] for d in days_per_customer_path[c][p] for p in paths_of_customer[c] for c in range(n_cust) for s in range(n_scenarios))
         ), sense="maximize")
     
     constraint_demand = {}
