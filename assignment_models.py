@@ -132,7 +132,7 @@ def build_paths_for_customer_consolidation_pair(cons_i, dest_i, cust_to_origin_c
                 return None
             else:
                 arrival_time = depart_opportunity_day + leg_tt + cust_i_3_tt
-                alternatives.append({"origin": cons_i, "destination": dest_i, "departing_at": depart_opportunity_day - cust_i_1_tt, "arriving_at": arrival_time, "land_cost": cust_i_1_c + cust_i_3_c, "air_block_cost": scheduled_object["block_cost"], "block_cap": scheduled_object["block_capacity"], "air_cap_blocks": scheduled_object["cargo_block_capacity"]})
+                alternatives.append({"origin": cons_i, "destination": dest_i, "departing_at": depart_opportunity_day - cust_i_1_tt, "arriving_at": arrival_time, "land_cost": cust_i_1_c + cust_i_3_c, "air_block_cost": scheduled_object["block_cost"], "block_cap": scheduled_object["block_capacity"], "air_cap_blocks": scheduled_object["cargo_block_capacity"], "leg_departure": depart_opportunity_day})
     return alternatives
 
 
@@ -142,7 +142,7 @@ def read_data():
     n_scenarios ready!
     n_cust ready!
     n_days ready!
-    n_legs ready!
+    n_legs <----- re-think this
 
     these are available in dict scenario_dict
     scenario_chance          # List[float] of length n_scenarios
@@ -172,6 +172,18 @@ def read_data():
     n_days = max(v["day"] for v in cargo_legs_dict.values()) + 5  # assuming days start at 0
 
     n_legs = len(legs_dict)
+    legs_list = list(legs_dict.keys())
+
+    capacity_cost = {}
+    unit_size = {}
+    leg_cnt = 0
+    for leg in legs_list:
+        capacity_cost[leg_cnt] = {}
+        for alternative in cargo_legs_dict[leg]:
+            # assuming it's unique
+            capacity_cost[leg_cnt][alternative["day"]] = alternative["block_cost"]
+            unit_size[leg_cnt][alternative["day"]] = alternative["block_capacity"]
+
 
     scenarios_all = {}
     for realisation in scenario_dict:
@@ -191,12 +203,14 @@ def read_data():
     # paths
     path_cost = {}
     days_per_customer_path = {}
+    # a list of dates in which customer c can depart using path p, such that the leg used in the path is taken on \bar{day}
+    day_for_leg_in_path = {}
     paths_of_customer = {}
     route_id = 0
     for c in range(n_cust):
         path_cost[c] = []
         days_per_customer_path[c] = []
-        paths_of_customer = []
+        paths_of_customer[c] = []
         customer = customer_dict[c]
         for cons_i in consolidation:
             if (c, cons_i) in exit_dict:
@@ -209,12 +223,14 @@ def read_data():
                         if alternatives != None:
                             path_cost[c] += [alternatives[i]["air_block_cost"] + alternatives[i]["land_cost"] for i in range(len(alternatives))]
                             days_per_customer_path[c] += [alternatives[i]["departing_at"] for i in range(len(alternatives))]
-                            for _ in alternatives:
+                            for alt in alternatives:
                                 paths_of_customer.append(route_id)
+                                day_for_leg_in_path[c, route_id, alt["leg_departure"]] = [alternatives[i]["departing_at"] for i in range(len(alternatives))]
                                 route_id += 1
+                                
 
 
-    return
+    return paths_of_customer, days_per_customer_path, n_scenarios, n_cust, n_days, n_legs, scenario_chance, revenue, capacity_cost, path_cost, demand, day_for_leg_in_path, unit_size
 
 def stoch_FFP_stochastic_model():
     from pyscipopt import Model, quicksum
@@ -253,7 +269,7 @@ def stoch_FFP_stochastic_model():
             constraint_z_c[c,s] = model.addCons( quicksum( x[c,p,d,s] for d in days_per_customer_path[c][p] for p in paths_of_customer[c]) == z[c,s], name="cons2_{}_{}".format(c,s) )
         for l in range(n_legs):
             for d in range(n_days):
-                constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d,s] for d in day_for_leg_in_path[c][p] for p in paths_of_customer[c] for c in range(n_cust)) <= unit_size[l][d]*y[l,d], name="cons3_{}_{}".format(l,d))
+                constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d_bar,s] for d_bar in day_for_leg_in_path[c][p][d] for p in paths_of_customer[c] for c in range(n_cust)) <= unit_size[l][d]*y[l,d], name="cons3_{}_{}".format(l,d))
     
     return model
 
