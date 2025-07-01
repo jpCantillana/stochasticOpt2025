@@ -1,9 +1,10 @@
-import glob
-
 class ProblemData:
-    def __init__(self, base_path="data_files/", scenario_pattern="100"):
+    def __init__(self, base_path="data_files/", customer_pattern="100", scenario_pattern="1"):
         self.base_path = base_path
+        self.customer_pattern = customer_pattern
         self.scenario_pattern = scenario_pattern
+        self.n_cust = int(self.customer_pattern)
+        self.n_scenarios = int(self.scenario_pattern)
 
         self.exit_dict = self.read_customer_to_consolidation_data()
         self.access_dict = self.read_consolidation_to_customer_data()
@@ -12,8 +13,6 @@ class ProblemData:
         self.cargo_legs_dict = self.read_cargo_legs_data()
         self.scenario_dict = self.read_scenario_data()
         self.consolidation = self.read_consolidation_points_data()
-
-        self.n_cust = len(self.customer_dict)
         self.n_days = max(v["day"] for vv in self.cargo_legs_dict.values() for v in vv) + 5
         self.n_legs = len(self.legs_dict)
 
@@ -35,7 +34,7 @@ class ProblemData:
 
     def read_customer_to_consolidation_data(self):
         data = {}
-        with self.read_file("consol_cust_moves.txt") as f:
+        with self.read_file("cust_consol_moves.txt") as f:
             for cnt, line in enumerate(f):
                 if cnt == 0: continue
                 line_data = line.split(",")
@@ -44,7 +43,7 @@ class ProblemData:
 
     def read_consolidation_to_customer_data(self):
         data = {}
-        with self.read_file("cust_consol_moves.txt") as f:
+        with self.read_file("consol_cust_moves.txt") as f:
             for cnt, line in enumerate(f):
                 if cnt == 0: continue
                 line_data = line.split(",")
@@ -89,13 +88,14 @@ class ProblemData:
         return data
 
     def read_scenario_data(self):
-        pattern = self.base_path + self.scenario_pattern + "*.txt"
+        import glob
+        pattern = self.base_path + self.customer_pattern + "_custs_" + self.scenario_pattern + "*scens_cust_demand_scens.txt"
         files = glob.glob(pattern)
         scenario_dict = {}
         for file in files:
-            name_split = file.split("_")
-            n_cust = int(name_split[-3])
-            n_scenarios = int(name_split[-1].replace(".txt", ""))
+            # name_split = file.split("_")
+            n_cust = self.n_cust
+            n_scenarios = self.n_scenarios
             scenario_dict[n_cust, n_scenarios] = {}
             with open(file) as f:
                 for cnt, line in enumerate(f):
@@ -171,12 +171,93 @@ class ProblemData:
                 if (c, cons_i) in self.exit_dict:
                     for dest_i in self.consolidation:
                         if (c, dest_i) in self.access_dict and (cons_i, dest_i) in self.legs_dict:
+                            # this ain't working properly
                             alts = self.build_paths_for_pair(c, cons_i, dest_i)
                             if not alts:
                                 continue
-                            self.path_cost[c, route_id] = [a["air_block_cost"] + a["land_cost"] for a in alts]
+                            self.path_cost[c, route_id] = alts[0]["air_block_cost"] + alts[0]["land_cost"]
                             self.days_per_customer_path[c, route_id] = [a["departing_at"] for a in alts]
                             for a in alts:
                                 self.paths_of_customer[c].append(route_id)
                                 self.day_for_leg_in_path[c, route_id, a["leg_departure"]] = [a["departing_at"] for a in alts]
                             route_id += 1
+    def stoch_FFP_stochastic_model(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                for p in self.paths_of_customer[c]:
+                    for d in range(self.n_days):
+                        x[c,p,d,s] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}_{}'.format(c,p,d,s))
+        
+        for l in range(self.n_legs):
+            for d in range(self.n_days):
+                y[l,d] = model.addVar(vtype='I', lb=0, name='y_{}_{}'.format(l,d))
+        
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                z[c,s] = model.addVar(vtype='C', lb=0, name='z_{}_{}'.format(c,s))
+        
+        model.setObjective(
+            (
+                # Revenue term
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c, s]
+                    for c in range(self.n_cust)
+                    for s in range(self.n_scenarios)
+                )
+                # Capacity cost term
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in range(self.n_days)
+                )
+                # Path cost term
+                - quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.path_cost.get((c, p), 0)
+                    * x[c, p, d, s]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    for s in range(self.n_scenarios)
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_demand = {}
+        constraint_z_c = {}
+        constraint_enabled_cap = {}
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                constraint_demand[c,s] = model.addCons(z[c,s] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s], name="cons1_{}_{}".format(c,s))
+                constraint_z_c[c,s] = model.addCons( quicksum( x[c,p,d,s] for d in self.days_per_customer_path.get((c, p), []) for p in self.paths_of_customer.get(c, [])) == z[c,s], name="cons2_{}_{}".format(c,s) )
+            for l in range(self.n_legs):
+                for d in range(self.n_days):
+                    # constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d_bar,s] for d_bar in self.day_for_leg_in_path.get((c,p,d), []) for p in self.paths_of_customer.get(c, []) for c in range(self.n_cust)) <= self.unit_size[l,d]*y[l,d], name="cons3_{}_{}".format(l,d))
+                    constraint_enabled_cap[l, d, s] = model.addCons(
+                        quicksum(
+                            x[c, p, d_bar, s]
+                            for c in range(self.n_cust)
+                            for p in self.paths_of_customer.get(c, [])
+                            for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                        )
+                        <= self.unit_size.get((l,d),0) * y[l, d],
+                        name="cons3_{}_{}".format(l, d)
+                    )
+        
+        return model
+
+test_object = ProblemData()
+model = test_object.stoch_FFP_stochastic_model()
+model.optimize()
+obj_val_big = model.getObjVal()
+print("end")
