@@ -24,9 +24,13 @@ class ProblemData:
         self.prepare_scenarios()
 
         self.paths_of_customer = {}
+        self.dedicated_paths_of_customer = {}
         self.days_per_customer_path = {}
+        self.days_per_customer_dedicated_path = {}
         self.day_for_leg_in_path = {}
+        self.day_for_leg_in_dedicated_path = {}
         self.path_cost = {}
+        self.dedicated_path_cost = {}
         self.build_all_paths()
 
     def read_file(self, file):
@@ -129,6 +133,37 @@ class ProblemData:
                 "demand": demand,
                 "revenue": revenue
             }
+    
+    def build_dedicated_paths_for_pair(self, c, cons_i, dest_i):
+        cust_to_origin = self.exit_dict[c, cons_i]
+        dest_to_dest = self.access_dict[c, dest_i]
+        leg = self.legs_dict[cons_i, dest_i]
+
+        pd = self.customer_dict[c]["pick-up_day"]
+        dd = pd + self.customer_dict[c]["service"]
+
+        tt = cust_to_origin["travel_times"] + dest_to_dest["travel_times"] + leg["travel_times"]
+
+        if pd + tt > dd:
+            return None
+
+        slack_times = dd - (pd + tt) + 1
+        alternatives = []
+
+        for d in range(pd + cust_to_origin["travel_times"], pd + cust_to_origin["travel_times"] + slack_times):
+            # scheduled = self.cargo_at_day(cons_i, dest_i, d)
+            # if not scheduled:
+            #     return None
+            arrival = d + leg["travel_times"] + dest_to_dest["travel_times"]
+            alternatives.append({
+                "origin": cons_i, "destination": dest_i,
+                "departing_at": d - cust_to_origin["travel_times"],
+                "arriving_at": arrival,
+                "land_cost": cust_to_origin["cost"] + dest_to_dest["cost"],
+                "air_block_cost": self.customer_dict[c]["dedicated_cost"],
+                "leg_departure": d
+            })
+        return alternatives
 
     def build_paths_for_pair(self, c, cons_i, dest_i):
         cust_to_origin = self.exit_dict[c, cons_i]
@@ -165,22 +200,36 @@ class ProblemData:
 
     def build_all_paths(self):
         route_id = 0
+        dedicated_route_id = 0
         for c in range(self.n_cust):
             self.paths_of_customer[c] = []
+            self.dedicated_paths_of_customer[c] = []
             for cons_i in self.consolidation:
                 if (c, cons_i) in self.exit_dict:
                     for dest_i in self.consolidation:
-                        if (c, dest_i) in self.access_dict and (cons_i, dest_i) in self.legs_dict:
-                            # this ain't working properly
-                            alts = self.build_paths_for_pair(c, cons_i, dest_i)
-                            if not alts:
-                                continue
-                            self.path_cost[c, route_id] = alts[0]["air_block_cost"] + alts[0]["land_cost"]
-                            self.days_per_customer_path[c, route_id] = [a["departing_at"] for a in alts]
-                            for a in alts:
-                                self.paths_of_customer[c].append(route_id)
-                                self.day_for_leg_in_path[c, route_id, a["leg_departure"]] = [a["departing_at"] for a in alts]
-                            route_id += 1
+                        if (c, dest_i) in self.access_dict:
+                            if (cons_i, dest_i) in self.legs_dict:
+                                # this ain't working properly
+                                alts = self.build_paths_for_pair(c, cons_i, dest_i)
+                                if not alts:
+                                    continue
+                                self.path_cost[c, route_id] = alts[0]["air_block_cost"] + alts[0]["land_cost"]
+                                self.days_per_customer_path[c, route_id] = [a["departing_at"] for a in alts]
+                                for a in alts:
+                                    self.paths_of_customer[c].append(route_id)
+                                    self.day_for_leg_in_path[c, route_id, a["leg_departure"]] = [a["departing_at"] for a in alts]
+                                route_id += 1
+                                # dedicated paths
+                                alts_2 = self.build_dedicated_paths_for_pair(c, cons_i, dest_i)
+                                if not alts_2:
+                                    continue
+                                self.dedicated_path_cost[c, dedicated_route_id] = alts_2[0]["air_block_cost"] + alts_2[0]["land_cost"]
+                                self.days_per_customer_dedicated_path[c, dedicated_route_id] = [a["departing_at"] for a in alts_2]
+                                for a in alts_2:
+                                    self.dedicated_paths_of_customer[c].append(dedicated_route_id)
+                                    self.day_for_leg_in_dedicated_path[c, dedicated_route_id, a["leg_departure"]] = [a["departing_at"] for a in alts_2]
+                                dedicated_route_id += 1
+                    
     def stoch_FFP_stochastic_model(self):
         from pyscipopt import Model, quicksum
         model = Model()
@@ -243,6 +292,7 @@ class ProblemData:
             for l in range(self.n_legs):
                 for d in range(self.n_days):
                     # constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d_bar,s] for d_bar in self.day_for_leg_in_path.get((c,p,d), []) for p in self.paths_of_customer.get(c, []) for c in range(self.n_cust)) <= self.unit_size[l,d]*y[l,d], name="cons3_{}_{}".format(l,d))
+                    # TODO: change the get methods for existence checks to save memory
                     constraint_enabled_cap[l, d, s] = model.addCons(
                         quicksum(
                             x[c, p, d_bar, s]
@@ -255,9 +305,109 @@ class ProblemData:
                     )
         
         return model
+    
+    def stoch_FFP_customer_commitment(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                for p in self.paths_of_customer.get(c, []):
+                    for d in range(self.n_days):
+                        x[c, p, d, s] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}_{s}')
+                # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+                for e in self.dedicated_paths_of_customer.get(c, []):
+                    for d in range(self.n_days):
+                        o[c, e, d, s] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}_{s}')
+
+        for l in range(self.n_legs):
+            for d in range(self.n_days):
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                    for s in range(self.n_scenarios)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in range(self.n_days)
+                )
+                # Path cost
+                - quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.path_cost.get((c, p), 0)
+                    * x[c, p, d, s]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    for s in range(self.n_scenarios)
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.dedicated_path_cost.get((c, e), 0)
+                    * o[c, e, d, s]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    for s in range(self.n_scenarios)
+                )
+            ),
+            sense="maximize"
+        )
+
+        constraint_demand = {}
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                # z <= demand
+                # constraint_demand[c, s] = model.addCons(
+                #     z[c, s] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                #     name=f"cons1_{c}_{s}"
+                # )
+                # Flow conservation: z = x + o
+                constraint_z[c, s] = model.addCons(
+                    quicksum(x[c, p, d, s] for p in self.paths_of_customer.get(c, []) for d in self.days_per_customer_path.get((c, p), []))
+                    + quicksum(o[c, e, d, s] for e in self.dedicated_paths_of_customer.get(c, []) for d in self.days_per_customer_dedicated_path.get((c, e), []))
+                    == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                    name=f"cons2_{c}_{s}"
+                )
+            for l in range(self.n_legs):
+                for d in range(self.n_days):
+                    # Capacity constraints
+                    constraint_capacity[l, d, s] = model.addCons(
+                        quicksum(
+                            x[c, p, d_bar, s]
+                            for c in range(self.n_cust)
+                            for p in self.paths_of_customer.get(c, [])
+                            for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                        )
+                        <= self.unit_size.get((l, d), 0) * y[l, d],
+                        name=f"cons3_{l}_{d}_{s}"
+                    )
+
+        return model
 
 test_object = ProblemData()
-model = test_object.stoch_FFP_stochastic_model()
+model = test_object.stoch_FFP_customer_commitment()
 model.optimize()
 obj_val_big = model.getObjVal()
 print("end")
