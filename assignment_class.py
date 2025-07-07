@@ -107,7 +107,8 @@ class ProblemData:
                     line_data = line.split(",")
                     scenario_dict[n_cust, n_scenarios][cnt-1] = {
                         "p": float(line_data[0]),
-                        "d": [float(x) for x in line_data[1:]]
+                        "d": [float(x) for x in line_data[1:n_cust + 1]],
+                        "c": [float(x) for x in line_data[n_cust + 1:]]
                     }
         return scenario_dict
 
@@ -385,8 +386,16 @@ class ProblemData:
                 # )
                 # Flow conservation: z = x + o
                 constraint_z[c, s] = model.addCons(
-                    quicksum(x[c, p, d, s] for p in self.paths_of_customer.get(c, []) for d in self.days_per_customer_path.get((c, p), []))
-                    + quicksum(o[c, e, d, s] for e in self.dedicated_paths_of_customer.get(c, []) for d in self.days_per_customer_dedicated_path.get((c, e), []))
+                    quicksum(
+                        x[c, p, d, s] 
+                        for p in self.paths_of_customer.get(c, []) 
+                        for d in self.days_per_customer_path.get((c, p), [])
+                        )
+                    + quicksum(
+                        o[c, e, d, s] 
+                        for e in self.dedicated_paths_of_customer.get(c, []) 
+                        for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                        )
                     == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
                     name=f"cons2_{c}_{s}"
                 )
@@ -403,11 +412,125 @@ class ProblemData:
                         <= self.unit_size.get((l, d), 0) * y[l, d],
                         name=f"cons3_{l}_{d}_{s}"
                     )
+        # debug_constraint = model.addCons(
+        #     quicksum(z[c] for c in range(self.n_cust)) >= 1, name="debug"
+        # )
+
+        return model
+    
+    def stoch_FFP_dedicated_uncertainty(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                for p in self.paths_of_customer.get(c, []):
+                    for d in range(self.n_days):
+                        x[c, p, d, s] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}_{s}')
+                # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+                for e in self.dedicated_paths_of_customer.get(c, []):
+                    for d in range(self.n_days):
+                        o[c, e, d, s] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}_{s}')
+
+        for l in range(self.n_legs):
+            for d in range(self.n_days):
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                    for s in range(self.n_scenarios)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in range(self.n_days)
+                )
+                # Path cost
+                - quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.path_cost.get((c, p), 0)
+                    * x[c, p, d, s]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    for s in range(self.n_scenarios)
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                    * self.scenario_dict[self.n_cust, self.n_scenarios][s]["d"][c]
+                    * o[c, e, d, s]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    for s in range(self.n_scenarios)
+                )
+            ),
+            sense="maximize"
+        )
+
+        constraint_demand = {}
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for s in range(self.n_scenarios):
+            for c in range(self.n_cust):
+                # z <= demand
+                # constraint_demand[c, s] = model.addCons(
+                #     z[c, s] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                #     name=f"cons1_{c}_{s}"
+                # )
+                # Flow conservation: z = x + o
+                constraint_z[c, s] = model.addCons(
+                    quicksum(
+                        x[c, p, d, s] 
+                        for p in self.paths_of_customer.get(c, []) 
+                        for d in self.days_per_customer_path.get((c, p), [])
+                        )
+                    + quicksum(
+                        o[c, e, d, s] 
+                        for e in self.dedicated_paths_of_customer.get(c, []) 
+                        for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                        )
+                    == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                    name=f"cons2_{c}_{s}"
+                )
+            for l in range(self.n_legs):
+                for d in range(self.n_days):
+                    # Capacity constraints
+                    constraint_capacity[l, d, s] = model.addCons(
+                        quicksum(
+                            x[c, p, d_bar, s]
+                            for c in range(self.n_cust)
+                            for p in self.paths_of_customer.get(c, [])
+                            for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                        )
+                        <= self.unit_size.get((l, d), 0) * y[l, d],
+                        name=f"cons3_{l}_{d}_{s}"
+                    )
+        # debug_constraint = model.addCons(
+        #     quicksum(z[c] for c in range(self.n_cust)) >= 1, name="debug"
+        # )
 
         return model
 
 test_object = ProblemData()
-model = test_object.stoch_FFP_customer_commitment()
+model = test_object.stoch_FFP_dedicated_uncertainty()
 model.optimize()
 obj_val_big = model.getObjVal()
 print("end")
