@@ -1,6 +1,7 @@
 class ProblemData:
-    def __init__(self, base_path="data_files/", customer_pattern="100", scenario_pattern="1"):
+    def __init__(self, base_path="data_files/", sample_path="data_files/", customer_pattern="100", scenario_pattern="1"):
         self.base_path = base_path
+        self.sample_path = sample_path
         self.customer_pattern = customer_pattern
         self.scenario_pattern = scenario_pattern
         self.n_cust = int(self.customer_pattern)
@@ -93,7 +94,7 @@ class ProblemData:
 
     def read_scenario_data(self):
         import glob
-        pattern = self.base_path + self.customer_pattern + "_custs_" + self.scenario_pattern + "*scens_cust_demand_scens.txt"
+        pattern = self.sample_path + self.customer_pattern + "_custs_" + self.scenario_pattern + "*scens_cust_demand_rec_cost_scens.txt"
         files = glob.glob(pattern)
         scenario_dict = {}
         for file in files:
@@ -529,8 +530,114 @@ class ProblemData:
 
         return model
 
-test_object = ProblemData()
-model = test_object.stoch_FFP_dedicated_uncertainty()
-model.optimize()
-obj_val_big = model.getObjVal()
+# test_object = ProblemData()
+# model = test_object.stoch_FFP_dedicated_uncertainty()
+# model.optimize()
+# obj_val_big = model.getObjVal()
+# print("end")
+
+class ProblemManagement:
+    def __init__(self):
+        pass
+
+    def run_model_in_stability(self, stop_condition, model_name, step_scens_list = [1,5,10,25,50,75,100,250,500,750], m_size=5):
+        import os
+        from statistics import mean, stdev
+        
+
+        id_scenarios = 0
+        n_scenarios = -1
+        condition = stop_condition*100
+        while condition > stop_condition:
+            n_scenarios = step_scens_list[id_scenarios]
+            id_scenarios += 1
+            objectives = []
+            for m in range(m_size):
+                if os.path.isfile(str(100) + '_custs_' + str(n_scenarios) + '_sampleM_' + str(m) + '_scens_cust_demand_rec_cost_scens.txt'):
+                    pass
+                else:
+                    os.system('python make_rc_scens_jp.py 100 {} {}'.format(n_scenarios,m))
+                data_object = ProblemData("data_files/","jp_instances/", customer_pattern="100", scenario_pattern=str(n_scenarios))
+                if model_name == "stoch_FFP_stochastic_model":
+                    model = data_object.stoch_FFP_stochastic_model()
+                elif model_name == "stoch_FFP_customer_commitment":
+                    model = data_object.stoch_FFP_customer_commitment()
+                elif model_name == "stoch_FFP_dedicated_uncertainty":
+                    model = data_object.stoch_FFP_dedicated_uncertainty()
+                else:
+                    # TODO: raise error
+                    print("not supported model")
+                # revenue_dict, scenarios_dict, capacity = read_data("folder/{}_{}.txt".format(m,n_scenarios))
+                # model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
+                model.optimize()
+                obj_val = model.getObjVal()
+                objectives.append(obj_val)
+            differences = []
+            for i in range(len(objectives)):
+                for j in range(i, len(objectives)):
+                    if i != j:
+                        differences.append(abs(objectives[i] - objectives[j]))
+            avg = mean(differences)
+            sd = stdev(differences)
+            # condition = sd/avg
+            condition = avg
+        return n_scenarios
+    
+    def run_model_out_stability(self, stop_condition, model_name, step_scens_list = [1,5,10,25,50,75,100,250,500,750], m_size=1, big_scenario=1000):
+        import os
+        from statistics import mean, stdev
+
+
+        # os.system('python make_knapsack_data.py 20 100 1000 >> folder/big_instance.txt')
+        data_object_big = ProblemData("data_files/","data_files/", customer_pattern="100", scenario_pattern=str(1000))
+        if model_name == "stoch_FFP_stochastic_model":
+            model_big = data_object_big.stoch_FFP_stochastic_model()
+        elif model_name == "stoch_FFP_customer_commitment":
+            model_big = data_object_big.stoch_FFP_customer_commitment()
+        elif model_name == "stoch_FFP_dedicated_uncertainty":
+            model_big = data_object_big.stoch_FFP_dedicated_uncertainty()
+        else:
+            # TODO: raise error
+            print("not supported model")
+        model_big.optimize()
+        obj_val_big = model_big.getObjVal()
+        
+        id_scenarios = 0
+        n_scenarios = -1
+        condition = stop_condition*100
+        while condition > stop_condition:
+            n_scenarios = step_scens_list[id_scenarios]
+            id_scenarios += 1
+            objectives = []
+            for m in range(m_size):
+                if os.path.isfile(str(100) + '_custs_' + str(n_scenarios) + '_sampleM_' + str(m) + '_scens_cust_demand_rec_cost_scens.txt'):
+                    pass
+                else:
+                    os.system('python make_rc_scens_jp.py 100 {} {}'.format(n_scenarios,m))
+                data_object = ProblemData("data_files/","jp_instances/", customer_pattern="100", scenario_pattern=str(n_scenarios))
+                if model_name == "stoch_FFP_stochastic_model":
+                    model = data_object.stoch_FFP_stochastic_model()
+                elif model_name == "stoch_FFP_customer_commitment":
+                    model = data_object.stoch_FFP_customer_commitment()
+                elif model_name == "stoch_FFP_dedicated_uncertainty":
+                    model = data_object.stoch_FFP_dedicated_uncertainty()
+                else:
+                    # TODO: raise error
+                    print("not supported model")
+                # revenue_dict, scenarios_dict, capacity = read_data("folder/{}_{}.txt".format(m,n_scenarios))
+                # model=stochastic_knapsack_stochastic_model(len(revenue_dict.keys()), revenue_dict, penalize_by, scenarios_dict, len(scenarios_dict.keys()), capacity)
+                model.optimize()
+                obj_val = model.getObjVal()
+                objectives.append(obj_val)
+            differences = []
+            for i in range(len(objectives)):
+                differences.append(abs(objectives[i] - obj_val_big))
+            avg = mean(differences)
+            sd = stdev(differences)
+            # condition = sd/avg
+            condition = avg
+        return n_scenarios
+    
+test_object = ProblemManagement()
+test_object.run_model_out_stability(10, "stoch_FFP_stochastic_model", m_size=5)
 print("end")
