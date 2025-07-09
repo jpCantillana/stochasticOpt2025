@@ -638,6 +638,274 @@ class ProblemData:
 
         return model
     
+    def stoch_FFP_customer_commitment_deterministic_model_stage_1(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["averaged_demand"][c]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.dedicated_path_cost.get((c, e), 0)
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                )
+            ),
+            sense="maximize"
+        )
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["averaged_demand"][c],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
+    
+    def stoch_FFP_customer_commitment_deterministic_model_stage_2(self, y, s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.dedicated_path_cost.get((c, e), 0)
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                )
+            ),
+            sense="maximize"
+        )
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
+    
+    def stoch_FFP_customer_commitment_deterministic_model_perfect_information(self, s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.dedicated_path_cost.get((c, e), 0)
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                )
+            ),
+            sense="maximize"
+        )
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
+    
     def stoch_FFP_dedicated_uncertainty(self):
         from pyscipopt import Model, quicksum
         model = Model()
@@ -737,6 +1005,284 @@ class ProblemData:
                         <= self.unit_size.get((l, d), 0) * y[l, d],
                         name=f"cons3_{l}_{d}_{s}"
                     )
+
+        return model
+    
+    def stoch_FFP_dedicated_uncertainty_deterministic_model_stage_1(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["averaged_demand"][c]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    quicksum(
+                        self.scenarios_all[self.n_cust, self.n_scenarios]["scenario_chance"][s]
+                        * self.scenario_dict[self.n_cust, self.n_scenarios][s]["c"][c]
+                        for s in range(self.n_scenarios)
+                    )
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["averaged_demand"][c],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
+    
+    def stoch_FFP_dedicated_uncertainty_deterministic_model_stage_2(self, y ,s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.scenario_dict[self.n_cust, self.n_scenarios][s]["c"][c]
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
+    
+    def stoch_FFP_dedicated_uncertainty_deterministic_model_perfect_information(self, s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+        o = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+
+        model.setObjective(
+            (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.scenario_dict[self.n_cust, self.n_scenarios][s]["c"][c]
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
 
         return model
 
@@ -851,17 +1397,60 @@ class ProblemManagement:
         data_object = ProblemData("data_files/","data_files/", customer_pattern=str(instance_cust), scenario_pattern=str(instance_scens))
         
         v_det = 0
+        model_stoch = data_object.stoch_FFP_stochastic_model()
         
         #1st stage: calculate fixed y
         if model_name == "stoch_FFP_stochastic_model":
             model_det_stage1 = data_object.stoch_FFP_deterministic_model_stage_1()
-            model_stoch = data_object.stoch_FFP_stochastic_model()
+            # obtain 1st stage decision
+            y = {}
+            model_det_stage1.optimize()
+            modelDet_st1_vars = model_det_stage1.getVars()
+            for var in modelDet_st1_vars:
+                if var.name[0] == "y":
+                    _, l, d = var.name.split("_")
+                    y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
+            
+            v_det += sum([-y[l,d] * data_object.capacity_cost[l,d] for l in range(data_object.n_legs) for d in data_object.leg_days[l]])
+            # call stage 2:
+            for s in range(data_object.n_scenarios):
+                model_stage2 = data_object.stoch_FFP_deterministic_model_stage_1(y, s)
+                model_stage2.optimize()
+                v_det += model_stage2.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
         elif model_name == "stoch_FFP_customer_commitment":
-            # TODO: raise error
-            print("not supported model")
+            model_det_stage1 = data_object.stoch_FFP_customer_commitment_deterministic_model_stage_1()
+            # obtain 1st stage decision
+            y = {}
+            model_det_stage1.optimize()
+            modelDet_st1_vars = model_det_stage1.getVars()
+            for var in modelDet_st1_vars:
+                if var.name[0] == "y":
+                    _, l, d = var.name.split("_")
+                    y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
+            
+            v_det += sum([-y[l,d] * data_object.capacity_cost[l,d] for l in range(data_object.n_legs) for d in data_object.leg_days[l]])
+            # call stage 2:
+            for s in range(data_object.n_scenarios):
+                model_stage2 = data_object.stoch_FFP_customer_commitment_deterministic_model_stage_2(y, s)
+                model_stage2.optimize()
+                v_det += model_stage2.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
         elif model_name == "stoch_FFP_dedicated_uncertainty":
-            # TODO: raise error
-            print("not supported model")
+            model_det_stage1 = data_object.stoch_FFP_dedicated_uncertainty_deterministic_model_stage_1()
+            # obtain 1st stage decision
+            y = {}
+            model_det_stage1.optimize()
+            modelDet_st1_vars = model_det_stage1.getVars()
+            for var in modelDet_st1_vars:
+                if var.name[0] == "y":
+                    _, l, d = var.name.split("_")
+                    y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
+            
+            v_det += sum([-y[l,d] * data_object.capacity_cost[l,d] for l in range(data_object.n_legs) for d in data_object.leg_days[l]])
+            # call stage 2:
+            for s in range(data_object.n_scenarios):
+                model_stage2 = data_object.stoch_FFP_dedicated_uncertainty_deterministic_model_stage_2(y, s)
+                model_stage2.optimize()
+                v_det += model_stage2.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
         else:
             # TODO: raise error
             print("not supported model")
@@ -869,22 +1458,9 @@ class ProblemManagement:
         # get first model
         model_stoch.optimize()
         v_sp = model_stoch.getObjVal()
-        # obtain 1st stage decision
-        y = {}
-        model_det_stage1.optimize()
-        modelDet_st1_vars = model_det_stage1.getVars()
-        for var in modelDet_st1_vars:
-            if var.name[0] == "y":
-                _, l, d = var.name.split("_")
-                y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
         
-        v_det += sum([-y[l,d] * data_object.capacity_cost[l,d] for l in range(data_object.n_legs) for d in data_object.leg_days[l]])
         
-        # call stage 2:
-        for s in range(data_object.n_scenarios):
-            model_stage2 = data_object.stoch_FFP_deterministic_model_stage_2(y, s)
-            model_stage2.optimize()
-            v_det += model_stage2.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
+        
         
         vss = v_det - v_sp
         print("pause")
@@ -901,11 +1477,17 @@ class ProblemManagement:
                 v_ws += model_pi.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
             model_stoch = data_object.stoch_FFP_stochastic_model()
         elif model_name == "stoch_FFP_customer_commitment":
-            # TODO: raise error
-            print("not supported model")
+            for s in range(data_object.n_scenarios):
+                model_pi = data_object.stoch_FFP_customer_commitment_deterministic_model_perfect_information(s)
+                model_pi.optimize()
+                v_ws += model_pi.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
+            model_stoch = data_object.stoch_FFP_customer_commitment()
         elif model_name == "stoch_FFP_dedicated_uncertainty":
-            # TODO: raise error
-            print("not supported model")
+            for s in range(data_object.n_scenarios):
+                model_pi = data_object.stoch_FFP_dedicated_uncertainty_deterministic_model_perfect_information(s)
+                model_pi.optimize()
+                v_ws += model_pi.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
+            model_stoch = data_object.stoch_FFP_dedicated_uncertainty()
         else:
             # TODO: raise error
             print("not supported model")
@@ -924,5 +1506,5 @@ class ProblemManagement:
 # print("end")
 
 test_object = ProblemManagement()
-test_object.run_perfect_information_model("stoch_FFP_stochastic_model", 100, 5)
+test_object.run_deterministic_model("stoch_FFP_customer_commitment", 100, 5)
 print("end")
