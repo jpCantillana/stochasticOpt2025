@@ -400,6 +400,69 @@ class ProblemData:
         
         return model
     
+    def stoch_FFP_deterministic_model_stage_2(self, y, s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        z = {}
+
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer[c]:
+                for d in self.days_per_customer_path[c,p]:
+                    x[c,p,d] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}'.format(c,p,d))
+        
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='C', lb=0, name='z_{}'.format(c))
+        
+        model.setObjective(
+            (
+                # Revenue term
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c]
+                    for c in range(self.n_cust)
+                )
+                # Path cost term
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_demand = {}
+        constraint_z_c = {}
+        constraint_enabled_cap = {}
+        constraint_debug = {}
+        for c in range(self.n_cust):
+            constraint_demand[c] = model.addCons(z[c] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s], name="cons1_{}".format(c))
+            constraint_z_c[c] = model.addCons( quicksum( 
+                                                        x[c,p,d]
+                                                        for p in self.paths_of_customer.get(c, [])
+                                                        for d in self.days_per_customer_path.get((c, p), [])
+                                                        ) == z[c], name="cons2_{}".format(c) )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                constraint_enabled_cap[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l,d),0) * y[l, d],
+                    name="cons3_{}_{}".format(l, d)
+                )
+        
+        return model
+    
     def stoch_FFP_customer_commitment(self):
         from pyscipopt import Model, quicksum
         model = Model()
@@ -711,12 +774,14 @@ class ProblemManagement:
         return n_scenarios
     
     def run_deterministic_model(self, model_name, instance_cust, instance_scens):
-        import os
         data_object = ProblemData("data_files/","data_files/", customer_pattern=str(instance_cust), scenario_pattern=str(instance_scens))
+        
+        v_det = 0
         
         #1st stage: calculate fixed y
         if model_name == "stoch_FFP_stochastic_model":
             model_det_stage1 = data_object.stoch_FFP_deterministic_model_stage_1()
+            model_stoch = data_object.stoch_FFP_stochastic_model()
         elif model_name == "stoch_FFP_customer_commitment":
             # TODO: raise error
             print("not supported model")
@@ -727,20 +792,27 @@ class ProblemManagement:
             # TODO: raise error
             print("not supported model")
         
-        vars = {}
+        # get first model
+        model_stoch.optimize()
+        v_sp = model_stoch.getObjVal()
+        # obtain 1st stage decision
+        y = {}
         model_det_stage1.optimize()
-        # stored_dict = model_det_stage1.getVarDict()
-        # print("pause")
-        model_vars = model_det_stage1.getVars()
-        # for l in data_object.n_legs:
-        #     for d in data_object.n_days:
-        #         y[l,d] = model_det_stage1.getVal(model_det_stage1.getVarByName("y_{}_{}".format(l,d)))
-        for var in model_vars:
-            vars[var.name] = round(float(model_det_stage1.getVal(var)))
-        obj_val = round(float(model_det_stage1.getObjVal()))
-        for var_name, var_val in vars.items():
-            if var_val > 0:
-                print(var_name+" val is "+str(var_val))
+        modelDet_st1_vars = model_det_stage1.getVars()
+        for var in modelDet_st1_vars:
+            if var.name[0] == "y":
+                _, l, d = var.name.split("_")
+                y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
+        
+        v_det += sum([-y[l,d] * data_object.capacity_cost[l,d] for l in range(data_object.n_legs) for d in data_object.leg_days[l]])
+        
+        # call stage 2:
+        for s in range(data_object.n_scenarios):
+            model_stage2 = data_object.stoch_FFP_deterministic_model_stage_2(y, s)
+            model_stage2.optimize()
+            v_det += model_stage2.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
+        
+        vss = v_det - v_sp
         print("pause")
         
     
@@ -749,5 +821,5 @@ class ProblemManagement:
 # print("end")
 
 test_object = ProblemManagement()
-test_object.run_deterministic_model("stoch_FFP_stochastic_model", 100, 10)
+test_object.run_deterministic_model("stoch_FFP_stochastic_model", 100, 5)
 print("end")
