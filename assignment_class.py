@@ -19,6 +19,7 @@ class ProblemData:
 
         self.capacity_cost = {}
         self.unit_size = {}
+        self.leg_days = {}
         self.prepare_leg_costs()
 
         self.scenarios_all = {}
@@ -32,6 +33,7 @@ class ProblemData:
         self.day_for_leg_in_dedicated_path = {}
         self.path_cost = {}
         self.dedicated_path_cost = {}
+        self.leg_in_path = {}
         self.build_all_paths()
 
     def read_file(self, file):
@@ -74,11 +76,13 @@ class ProblemData:
 
     def read_legs_data(self):
         data = {}
+        leg_id = 0
         with self.read_file("legs.txt") as f:
             for cnt, line in enumerate(f):
                 if cnt == 0: continue
                 line_data = line.split(",")
-                data[line_data[0], line_data[1]] = {"travel_times": int(line_data[2])}
+                data[line_data[0], line_data[1]] = {"travel_times": int(line_data[2]), "id": leg_id}
+                leg_id += 1
         return data
 
     def read_cargo_legs_data(self):
@@ -121,19 +125,27 @@ class ProblemData:
 
     def prepare_leg_costs(self):
         for leg_cnt, leg in enumerate(self.legs_dict):
+            self.leg_days[leg_cnt] = []
             for alt in self.cargo_legs_dict.get(leg, []):
                 self.capacity_cost[leg_cnt, alt["day"]] = alt["block_cost"]
                 self.unit_size[leg_cnt, alt["day"]] = alt["block_capacity"]
+                self.leg_days[leg_cnt].append(alt["day"])
 
     def prepare_scenarios(self):
         for (n_cust_scen, n_scenarios), scenario_info in self.scenario_dict.items():
             scenario_chance = [scenario_info[s]["p"] for s in range(n_scenarios)]
             demand = [[scenario_info[s]["d"][c] for s in range(n_scenarios)] for c in range(self.n_cust)]
+            averaged_demand = [sum([demand[c][s] * scenario_chance[s] for s in range(n_scenarios)]) for c in range(self.n_cust)]
             revenue = [self.customer_dict[c]["unit_revenue"] for c in range(self.n_cust)]
+            cost = [[scenario_info[s]["c"][c] for s in range(n_scenarios)] for c in range(self.n_cust)]
+            averaged_cost = [sum([cost[c][s] * scenario_chance[s] for s in range(n_scenarios)]) for c in range(self.n_cust)]
             self.scenarios_all[n_cust_scen, n_scenarios] = {
                 "scenario_chance": scenario_chance,
                 "demand": demand,
-                "revenue": revenue
+                "revenue": revenue,
+                "cost": cost,
+                "averaged_demand": averaged_demand,
+                "averaged_cost": averaged_cost
             }
     
     def build_dedicated_paths_for_pair(self, c, cons_i, dest_i):
@@ -196,7 +208,8 @@ class ProblemData:
                 "air_block_cost": scheduled["block_cost"],
                 "block_cap": scheduled["block_capacity"],
                 "air_cap_blocks": scheduled["cargo_block_capacity"],
-                "leg_departure": d
+                "leg_departure": d,
+                "leg_id": leg["id"]
             })
         return alternatives
 
@@ -215,11 +228,14 @@ class ProblemData:
                                 alts = self.build_paths_for_pair(c, cons_i, dest_i)
                                 if not alts:
                                     continue
-                                self.path_cost[c, route_id] = alts[0]["air_block_cost"] + alts[0]["land_cost"]
+                                # self.path_cost[c, route_id] = alts[0]["air_block_cost"] + alts[0]["land_cost"]
+                                self.path_cost[c, route_id] = alts[0]["land_cost"]
                                 self.days_per_customer_path[c, route_id] = [a["departing_at"] for a in alts]
                                 for a in alts:
                                     self.paths_of_customer[c].append(route_id)
-                                    self.day_for_leg_in_path[c, route_id, a["leg_departure"]] = [a["departing_at"] for a in alts]
+                                    self.day_for_leg_in_path[c, route_id, a["leg_departure"]] = [a["departing_at"]]
+                                    leg = a["leg_id"]
+                                    self.leg_in_path[leg, route_id, c] = 1
                                 route_id += 1
                                 # dedicated paths
                                 alts_2 = self.build_dedicated_paths_for_pair(c, cons_i, dest_i)
@@ -229,7 +245,7 @@ class ProblemData:
                                 self.days_per_customer_dedicated_path[c, dedicated_route_id] = [a["departing_at"] for a in alts_2]
                                 for a in alts_2:
                                     self.dedicated_paths_of_customer[c].append(dedicated_route_id)
-                                    self.day_for_leg_in_dedicated_path[c, dedicated_route_id, a["leg_departure"]] = [a["departing_at"] for a in alts_2]
+                                    self.day_for_leg_in_dedicated_path[c, dedicated_route_id, a["leg_departure"]] = [a["departing_at"]]
                                 dedicated_route_id += 1
                     
     def stoch_FFP_stochastic_model(self):
@@ -243,11 +259,11 @@ class ProblemData:
         for s in range(self.n_scenarios):
             for c in range(self.n_cust):
                 for p in self.paths_of_customer[c]:
-                    for d in range(self.n_days):
+                    for d in self.days_per_customer_path[c,p]:
                         x[c,p,d,s] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}_{}'.format(c,p,d,s))
         
         for l in range(self.n_legs):
-            for d in range(self.n_days):
+            for d in self.leg_days[l]:
                 y[l,d] = model.addVar(vtype='I', lb=0, name='y_{}_{}'.format(l,d))
         
         for s in range(self.n_scenarios):
@@ -268,7 +284,7 @@ class ProblemData:
                 - quicksum(
                     self.capacity_cost.get((l, d), 0) * y[l, d]
                     for l in range(self.n_legs)
-                    for d in range(self.n_days)
+                    for d in self.leg_days[l]
                 )
                 # Path cost term
                 - quicksum(
@@ -287,12 +303,17 @@ class ProblemData:
         constraint_demand = {}
         constraint_z_c = {}
         constraint_enabled_cap = {}
+        # constraint_debug = {}
         for s in range(self.n_scenarios):
             for c in range(self.n_cust):
                 constraint_demand[c,s] = model.addCons(z[c,s] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s], name="cons1_{}_{}".format(c,s))
-                constraint_z_c[c,s] = model.addCons( quicksum( x[c,p,d,s] for d in self.days_per_customer_path.get((c, p), []) for p in self.paths_of_customer.get(c, [])) == z[c,s], name="cons2_{}_{}".format(c,s) )
+                constraint_z_c[c,s] = model.addCons( quicksum( 
+                                                              x[c,p,d,s] 
+                                                              for p in self.paths_of_customer.get(c, [])
+                                                              for d in self.days_per_customer_path.get((c, p), []) 
+                                                              ) == z[c,s], name="cons2_{}_{}".format(c,s) )
             for l in range(self.n_legs):
-                for d in range(self.n_days):
+                for d in self.leg_days[l]:
                     # constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d_bar,s] for d_bar in self.day_for_leg_in_path.get((c,p,d), []) for p in self.paths_of_customer.get(c, []) for c in range(self.n_cust)) <= self.unit_size[l,d]*y[l,d], name="cons3_{}_{}".format(l,d))
                     # TODO: change the get methods for existence checks to save memory
                     constraint_enabled_cap[l, d, s] = model.addCons(
@@ -303,8 +324,92 @@ class ProblemData:
                             for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
                         )
                         <= self.unit_size.get((l,d),0) * y[l, d],
-                        name="cons3_{}_{}".format(l, d)
+                        name="cons3_{}_{}_{}".format(l, d, s)
                     )
+        # constraint_debug = model.addCons(
+        #     quicksum(
+        #         y[l,d]
+        #         for l in range(self.n_legs)
+        #         for d in self.leg_days[l]
+        #     ) >= 1,
+        #     name="cons_debug"
+        # )
+        
+        return model
+    
+    def stoch_FFP_deterministic_model_stage_1(self):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer[c]:
+                for d in self.days_per_customer_path[c,p]:
+                    x[c,p,d] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}'.format(c,p,d))
+        
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l,d] = model.addVar(vtype='I', lb=0, name='y_{}_{}'.format(l,d))
+        
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='C', lb=0, name='z_{}'.format(c))
+        
+        model.setObjective(
+            (
+                # Revenue term
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost term
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost term
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_demand = {}
+        constraint_z_c = {}
+        constraint_enabled_cap = {}
+        constraint_debug = {}
+        for c in range(self.n_cust):
+            constraint_demand[c] = model.addCons(z[c] <= self.scenarios_all[self.n_cust, self.n_scenarios]["averaged_demand"][c], name="cons1_{}".format(c))
+            constraint_z_c[c] = model.addCons( quicksum( 
+                                                        x[c,p,d]
+                                                        for p in self.paths_of_customer.get(c, [])
+                                                        for d in self.days_per_customer_path.get((c, p), [])
+                                                        ) == z[c], name="cons2_{}".format(c) )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # constraint_enabled_cap[l,d,s] = model.addCons(quicksum(x[c,p,d_bar,s] for d_bar in self.day_for_leg_in_path.get((c,p,d), []) for p in self.paths_of_customer.get(c, []) for c in range(self.n_cust)) <= self.unit_size[l,d]*y[l,d], name="cons3_{}_{}".format(l,d))
+                # TODO: change the get methods for existence checks to save memory
+                constraint_enabled_cap[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l,d),0) * y[l, d],
+                    name="cons3_{}_{}".format(l, d)
+                )
         
         return model
     
@@ -530,11 +635,15 @@ class ProblemData:
 
         return model
 
-# test_object = ProblemData()
-# model = test_object.stoch_FFP_dedicated_uncertainty()
-# model.optimize()
-# obj_val_big = model.getObjVal()
-# print("end")
+test_object = ProblemData(scenario_pattern="1")
+model = test_object.stoch_FFP_stochastic_model()
+model.optimize()
+var_dict = {}
+obj_val_big = model.getObjVal()
+model_vars = model.getVars()
+for var in model_vars:
+    var_dict[var.name] = round(float(model.getVal(var)))
+print("end")
 
 class ProblemManagement:
     def __init__(self):
@@ -638,6 +747,44 @@ class ProblemManagement:
             condition = avg
         return n_scenarios
     
-test_object = ProblemManagement()
-test_object.run_model_out_stability(10, "stoch_FFP_stochastic_model", m_size=5)
-print("end")
+    def run_deterministic_model(self, model_name, instance_cust, instance_scens):
+        import os
+        data_object = ProblemData("data_files/","data_files/", customer_pattern=str(instance_cust), scenario_pattern=str(instance_scens))
+        
+        #1st stage: calculate fixed y
+        if model_name == "stoch_FFP_stochastic_model":
+            model_det_stage1 = data_object.stoch_FFP_deterministic_model_stage_1()
+        elif model_name == "stoch_FFP_customer_commitment":
+            # TODO: raise error
+            print("not supported model")
+        elif model_name == "stoch_FFP_dedicated_uncertainty":
+            # TODO: raise error
+            print("not supported model")
+        else:
+            # TODO: raise error
+            print("not supported model")
+        
+        vars = {}
+        model_det_stage1.optimize()
+        # stored_dict = model_det_stage1.getVarDict()
+        # print("pause")
+        model_vars = model_det_stage1.getVars()
+        # for l in data_object.n_legs:
+        #     for d in data_object.n_days:
+        #         y[l,d] = model_det_stage1.getVal(model_det_stage1.getVarByName("y_{}_{}".format(l,d)))
+        for var in model_vars:
+            vars[var.name] = round(float(model_det_stage1.getVal(var)))
+        obj_val = round(float(model_det_stage1.getObjVal()))
+        for var_name, var_val in vars.items():
+            if var_val > 0:
+                print(var_name+" val is "+str(var_val))
+        print("pause")
+        
+    
+# test_object = ProblemManagement()
+# test_object.run_model_out_stability(10, "stoch_FFP_stochastic_model", m_size=5)
+# print("end")
+
+# test_object = ProblemManagement()
+# test_object.run_deterministic_model("stoch_FFP_stochastic_model", 100, 1)
+# print("end")
