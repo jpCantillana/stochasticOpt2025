@@ -463,6 +463,80 @@ class ProblemData:
         
         return model
     
+    def stoch_FFP_deterministic_model_perfect_information(self, s):
+        from pyscipopt import Model, quicksum
+        model = Model()
+
+        x = {}
+        y = {}
+        z = {}
+
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer[c]:
+                for d in self.days_per_customer_path[c,p]:
+                    x[c,p,d] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}'.format(c,p,d))
+        
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l,d] = model.addVar(vtype='I', lb=0, name='y_{}_{}'.format(l,d))
+        
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='C', lb=0, name='z_{}'.format(c))
+        
+        model.setObjective(
+            (
+                # Revenue term
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c]
+                    for c in range(self.n_cust)
+                )
+                # Capacity cost term
+                - quicksum(
+                    self.capacity_cost.get((l, d), 0) * y[l, d]
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # Path cost term
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+            ),
+            sense="maximize"
+        )
+        
+        constraint_demand = {}
+        constraint_z_c = {}
+        constraint_enabled_cap = {}
+        # constraint_debug = {}
+        for c in range(self.n_cust):
+            constraint_demand[c] = model.addCons(z[c] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s], name="cons1_{}".format(c))
+            constraint_z_c[c] = model.addCons( quicksum( 
+                                                        x[c,p,d]
+                                                        for p in self.paths_of_customer.get(c, [])
+                                                        for d in self.days_per_customer_path.get((c, p), [])
+                                                        ) == z[c], name="cons2_{}".format(c) )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                constraint_enabled_cap[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l,d),0) * y[l, d],
+                    name="cons3_{}_{}".format(l, d)
+                )
+        
+        return model
+    
     def stoch_FFP_customer_commitment(self):
         from pyscipopt import Model, quicksum
         model = Model()
@@ -814,6 +888,35 @@ class ProblemManagement:
         
         vss = v_det - v_sp
         print("pause")
+    
+    def run_perfect_information_model(self, model_name, instance_cust, instance_scens):
+        data_object = ProblemData("data_files/","data_files/", customer_pattern=str(instance_cust), scenario_pattern=str(instance_scens))
+        
+        v_ws = 0
+        #1st stage: calculate fixed y
+        if model_name == "stoch_FFP_stochastic_model":
+            for s in range(data_object.n_scenarios):
+                model_pi = data_object.stoch_FFP_deterministic_model_perfect_information(s)
+                model_pi.optimize()
+                v_ws += model_pi.getObjVal() * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s]
+            model_stoch = data_object.stoch_FFP_stochastic_model()
+        elif model_name == "stoch_FFP_customer_commitment":
+            # TODO: raise error
+            print("not supported model")
+        elif model_name == "stoch_FFP_dedicated_uncertainty":
+            # TODO: raise error
+            print("not supported model")
+        else:
+            # TODO: raise error
+            print("not supported model")
+        
+        # get first model
+        model_stoch.optimize()
+        v_sp = model_stoch.getObjVal()
+        
+        
+        evpi = v_sp - v_ws
+        print("pause")
         
     
 # test_object = ProblemManagement()
@@ -821,5 +924,5 @@ class ProblemManagement:
 # print("end")
 
 test_object = ProblemManagement()
-test_object.run_deterministic_model("stoch_FFP_stochastic_model", 100, 5)
+test_object.run_perfect_information_model("stoch_FFP_stochastic_model", 100, 5)
 print("end")
