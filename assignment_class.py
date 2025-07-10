@@ -537,6 +537,87 @@ class ProblemData:
         
         return model
     
+    def stoch_FFP_progressive_hedging(self, s, price_lambda, price_rho, y_bar):
+        from pyscipopt import Model, quicksum
+        from pyscipopt.recipes.nonlinear import set_nonlinear_objective
+        model = Model()
+
+        x = {}
+        z = {}
+        y = {}
+
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer[c]:
+                for d in self.days_per_customer_path[c,p]:
+                    x[c,p,d] = model.addVar(vtype='C', lb=0, name='x_{}_{}_{}'.format(c,p,d))
+        
+        # for s in range(self.n_scenarios):
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='C', lb=0, name='z_{}'.format(c))
+        
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l,d] = model.addVar(vtype='I', lb=0, name='y_{}_{}'.format(l,d))
+        
+        expr = (
+                # Revenue term
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c]
+                    for c in range(self.n_cust)
+                )
+                # Path cost term
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # lambda lagrange relaxation
+                - quicksum(
+                    price_lambda[l, d, s] * (y[l,d] - y_bar[l,d])
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # rho relaxation
+                - quicksum(
+                    # price_rho[l, d, s]/2 * (y[l,d] - y_bar[l,d]) * (y[l,d] - y_bar[l,d])
+                    price_rho[l, d, s]/2 * (y[l,d] * y[l,d] - 2 * y_bar[l,d] * y[l,d] + y_bar[l,d] * y_bar[l,d])
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+            )
+        
+        set_nonlinear_objective(model, expr, sense="maximize")
+        
+        constraint_demand = {}
+        constraint_z_c = {}
+        constraint_enabled_cap = {}
+        constraint_debug = {}
+        for c in range(self.n_cust):
+            constraint_demand[c] = model.addCons(z[c] <= self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s], name="cons1_{}".format(c))
+            constraint_z_c[c] = model.addCons( quicksum( 
+                                                        x[c,p,d]
+                                                        for p in self.paths_of_customer.get(c, [])
+                                                        for d in self.days_per_customer_path.get((c, p), [])
+                                                        ) == z[c], name="cons2_{}".format(c) )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                constraint_enabled_cap[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l,d),0) * y[l, d],
+                    name="cons3_{}_{}".format(l, d)
+                )
+        
+        return model
+    
     def stoch_FFP_customer_commitment(self):
         from pyscipopt import Model, quicksum
         model = Model()
@@ -906,8 +987,9 @@ class ProblemData:
 
         return model
     
-    def stoch_FFP_customer_commitment_progressive_hedging (self, s, price_lambda, y_bar):
+    def stoch_FFP_customer_commitment_progressive_hedging (self, s, price_lambda, price_rho, y_bar):
         from pyscipopt import Model, quicksum
+        from pyscipopt.recipes.nonlinear import set_nonlinear_objective
         model = Model()
 
         x = {}
@@ -931,8 +1013,7 @@ class ProblemData:
             for d in self.leg_days[l]:
                 y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
 
-        model.setObjective(
-            (
+        expr = (
                 # Revenue
                 quicksum(
                     self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
@@ -961,9 +1042,17 @@ class ProblemData:
                     for l in range(self.n_legs)
                     for d in self.leg_days[l]
                 )
-            ),
-            sense="maximize"
-        )
+                # rho relaxation
+                - quicksum(
+                    # price_rho[l, d, s]/2 * (y[l,d] - y_bar[l,d]) * (y[l,d] - y_bar[l,d])
+                    price_rho[l, d, s]/2 * (y[l,d] * y[l,d] - 2 * y_bar[l,d] * y[l,d] + y_bar[l,d] * y_bar[l,d])
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+            )
+        
+        set_nonlinear_objective(model, expr, sense="maximize")
+        
         constraint_z = {}
         constraint_capacity = {}
 
@@ -1378,6 +1467,107 @@ class ProblemData:
                 )
 
         return model
+    
+    def stoch_FFP_dedicated_uncertainty_progressive_hedging(self, s, price_lambda, price_rho, y_bar):
+        from pyscipopt import Model, quicksum
+        from pyscipopt.recipes.nonlinear import set_nonlinear_objective
+        model = Model()
+
+        x = {}
+        z = {}
+        o = {}
+        y = {}
+
+        for c in range(self.n_cust):
+            for p in self.paths_of_customer.get(c, []):
+                for d in self.days_per_customer_path[c,p]:
+                    x[c, p, d] = model.addVar(vtype='C', lb=0, name=f'x_{c}_{p}_{d}')
+            # shall we create all time-feasible combinations for dedicated_paths_of_customer?
+            for e in self.dedicated_paths_of_customer.get(c, []):
+                for d in self.days_per_customer_dedicated_path[c,e]:
+                    o[c, e, d] = model.addVar(vtype='C', lb=0, name=f'o_{c}_{e}_{d}')
+
+        for c in range(self.n_cust):
+            z[c] = model.addVar(vtype='B', lb=0, name=f'z_{c}')
+        
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                y[l, d] = model.addVar(vtype='I', lb=0, name=f'y_{l}_{d}')
+
+        expr = (
+                # Revenue
+                quicksum(
+                    self.scenarios_all[self.n_cust, self.n_scenarios]["revenue"][c]
+                    * z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s]
+                    for c in range(self.n_cust)
+                )
+                # Path cost
+                - quicksum(
+                    self.path_cost.get((c, p), 0)
+                    * x[c, p, d]
+                    for c in range(self.n_cust)
+                    for p in self.paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_path.get((c, p), [])
+                )
+                # Dedicated path cost
+                - quicksum(
+                    self.scenario_dict[self.n_cust, self.n_scenarios][s]["c"][c]
+                    * o[c, e, d]
+                    for c in range(self.n_cust)
+                    for e in self.dedicated_paths_of_customer.get(c, [])
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                )
+                # lambda lagrange relaxation
+                - quicksum(
+                    price_lambda[l, d, s] * (y[l,d] - y_bar[l,d])
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+                # rho relaxation
+                - quicksum(
+                    # price_rho[l, d, s]/2 * (y[l,d] - y_bar[l,d]) * (y[l,d] - y_bar[l,d])
+                    price_rho[l, d, s]/2 * (y[l,d] * y[l,d] - 2 * y_bar[l,d] * y[l,d] + y_bar[l,d] * y_bar[l,d])
+                    for l in range(self.n_legs)
+                    for d in self.leg_days[l]
+                )
+            )
+        
+        set_nonlinear_objective(model, expr, sense="maximize")
+        
+        constraint_z = {}
+        constraint_capacity = {}
+
+        for c in range(self.n_cust):
+            # Flow conservation: z = x + o
+            constraint_z[c] = model.addCons(
+                quicksum(
+                    x[c, p, d] 
+                    for p in self.paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_path.get((c, p), [])
+                    )
+                + quicksum(
+                    o[c, e, d] 
+                    for e in self.dedicated_paths_of_customer.get(c, []) 
+                    for d in self.days_per_customer_dedicated_path.get((c, e), [])
+                    )
+                == z[c] * self.scenarios_all[self.n_cust, self.n_scenarios]["demand"][c][s],
+                name=f"cons2_{c}"
+            )
+        for l in range(self.n_legs):
+            for d in self.leg_days[l]:
+                # Capacity constraints
+                constraint_capacity[l, d] = model.addCons(
+                    quicksum(
+                        x[c, p, d_bar]
+                        for c in range(self.n_cust)
+                        for p in self.paths_of_customer.get(c, [])
+                        for d_bar in self.day_for_leg_in_path.get((c, p, d), [])
+                    )
+                    <= self.unit_size.get((l, d), 0) * y[l, d],
+                    name=f"cons3_{l}_{d}"
+                )
+
+        return model
 
 # test_object = ProblemData(scenario_pattern="1")
 # model = test_object.stoch_FFP_dedicated_uncertainty()
@@ -1593,15 +1783,20 @@ class ProblemManagement:
         evpi = v_sp - v_ws
         print("pause")
     
-    def progressive_hedging(self, model_name, instance_cust, instance_scens, criterion = 0.1):
+    def progressive_hedging(
+        self, 
+        model_name, 
+        instance_cust, 
+        instance_scens, 
+        criterion = 0.1, step_delta=1, price_lambda_val=1, price_rho_val=1):
         from copy import deepcopy
         
         data_object = ProblemData("data_files/","data_files/", customer_pattern=str(instance_cust), scenario_pattern=str(instance_scens))
         # define initial step, scalar and initial vals
-        step_delta = 1
+        step_delta = 0.2
         step_nu = 1
-        price_lambda = { (l,d,s): 1 for d in data_object.leg_days[l] for l in data_object.n_legs for s in range(data_object.n_scenarios)}
-        price_rho = 1
+        price_lambda = { (l,d,s): price_lambda_val for l in range(data_object.n_legs) for d in data_object.leg_days[l] for s in range(data_object.n_scenarios)}
+        price_rho = { (l,d,s): price_rho_val for l in range(data_object.n_legs) for d in data_object.leg_days[l] for s in range(data_object.n_scenarios)}
         
         # get a good y_bar
         if model_name == "stoch_FFP_stochastic_model":
@@ -1615,8 +1810,36 @@ class ProblemManagement:
                     _, l, d = var.name.split("_")
                     y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
             
-            # TODO: raise error
-            print("not supported model")
+            # iterate
+            mae = 1
+            while mae > criterion:
+                # progress
+                y_per_scenario = {}
+                for s in range(data_object.n_scenarios):
+                    model_hedging = data_object.stoch_FFP_progressive_hedging(s, price_lambda, price_rho, y)
+                    model_hedging.optimize()
+                    y_s = {}
+                    model_hedging_vars = model_hedging.getVars()
+                    for var in model_hedging_vars:
+                        if var.name[0] == "y":
+                            _, l, d = var.name.split("_")
+                            y_s[int(l), int(d)] = round(float(model_hedging.getVal(var)))
+                    y_per_scenario[s] = deepcopy(y_s)
+                
+                #compute global y
+                abs_diff = []
+                for l in range(data_object.n_legs):
+                    for d in data_object.leg_days[l]:
+                        y_per_legday = []
+                        for s in range(data_object.n_scenarios):
+                            y_per_legday.append(y_per_scenario[s][l, d] * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s])
+                        abs_diff.append(abs(y[l, d] - round(sum(y_per_legday))))
+                        y[l, d] = round(sum(y_per_legday))
+                
+                        #update lambda
+                        for s in range(data_object.n_scenarios):
+                            price_lambda[l, d, s] = price_lambda[l, d, s] + step_delta*(y_per_scenario[s][l, d] - y[l,d])
+                mae = sum(abs_diff)/len(abs_diff)
             
         elif model_name == "stoch_FFP_customer_commitment":
             model_det_stage1 = data_object.stoch_FFP_customer_commitment_deterministic_model_stage_1()
@@ -1635,7 +1858,7 @@ class ProblemManagement:
                 # progress
                 y_per_scenario = {}
                 for s in range(data_object.n_scenarios):
-                    model_hedging = data_object.stoch_FFP_customer_commitment_progressive_hedging(s, price_lambda, y)
+                    model_hedging = data_object.stoch_FFP_customer_commitment_progressive_hedging(s, price_lambda, price_rho, y)
                     model_hedging.optimize()
                     y_s = {}
                     model_hedging_vars = model_hedging.getVars()
@@ -1647,7 +1870,7 @@ class ProblemManagement:
                 
                 #compute global y
                 abs_diff = []
-                for l in data_object.n_legs:
+                for l in range(data_object.n_legs):
                     for d in data_object.leg_days[l]:
                         y_per_legday = []
                         for s in range(data_object.n_scenarios):
@@ -1660,7 +1883,6 @@ class ProblemManagement:
                             price_lambda[l, d, s] = price_lambda[l, d, s] + step_delta*(y_per_scenario[s][l, d] - y[l,d])
                 mae = sum(abs_diff)/len(abs_diff)
                 
-            
         elif model_name == "stoch_FFP_dedicated_uncertainty":
             model_det_stage1 = data_object.stoch_FFP_dedicated_uncertainty_deterministic_model_stage_1()
             # obtain 1st stage decision
@@ -1672,13 +1894,41 @@ class ProblemManagement:
                     _, l, d = var.name.split("_")
                     y[int(l), int(d)] = round(float(model_det_stage1.getVal(var)))
             
-            # TODO: raise error
-            print("not supported model")
+            # iterate
+            mae = 1
+            while mae > criterion:
+                # progress
+                y_per_scenario = {}
+                for s in range(data_object.n_scenarios):
+                    model_hedging = data_object.stoch_FFP_dedicated_uncertainty_progressive_hedging(s, price_lambda, price_rho, y)
+                    model_hedging.optimize()
+                    y_s = {}
+                    model_hedging_vars = model_hedging.getVars()
+                    for var in model_hedging_vars:
+                        if var.name[0] == "y":
+                            _, l, d = var.name.split("_")
+                            y_s[int(l), int(d)] = round(float(model_hedging.getVal(var)))
+                    y_per_scenario[s] = deepcopy(y_s)
+                
+                #compute global y
+                abs_diff = []
+                for l in range(data_object.n_legs):
+                    for d in data_object.leg_days[l]:
+                        y_per_legday = []
+                        for s in range(data_object.n_scenarios):
+                            y_per_legday.append(y_per_scenario[s][l, d] * data_object.scenarios_all[data_object.n_cust, data_object.n_scenarios]["scenario_chance"][s])
+                        abs_diff.append(abs(y[l, d] - round(sum(y_per_legday))))
+                        y[l, d] = round(sum(y_per_legday))
+                
+                        #update lambda
+                        for s in range(data_object.n_scenarios):
+                            price_lambda[l, d, s] = price_lambda[l, d, s] + step_delta*(y_per_scenario[s][l, d] - y[l,d])
+                mae = sum(abs_diff)/len(abs_diff)
             
         else:
             # TODO: raise error
             print("not supported model")
-        pass
+        print("end")
         
     
 # test_object = ProblemManagement()
@@ -1686,5 +1936,5 @@ class ProblemManagement:
 # print("end")
 
 test_object = ProblemManagement()
-test_object.run_deterministic_model("stoch_FFP_customer_commitment", 100, 5)
+test_object.progressive_hedging("stoch_FFP_dedicated_uncertainty", 100, 5, price_rho_val=10)
 print("end")
